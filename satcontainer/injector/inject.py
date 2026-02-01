@@ -1,4 +1,4 @@
-"""镜像注入逻辑实现 - 直接操作OCI格式tar文件"""
+"""镜像注入逻辑实现 - 支持 OCI 和 Docker 格式的 tar 文件"""
 
 import gzip
 import hashlib
@@ -13,7 +13,7 @@ from satcontainer.config import default_config, Config
 
 
 class ImageInjector:
-    """镜像注入器 - 将wrapper程序注入到OCI格式的容器镜像tar文件中"""
+    """镜像注入器 - 将wrapper程序注入到OCI/Docker格式的容器镜像tar文件中"""
 
     def __init__(
         self,
@@ -23,7 +23,7 @@ class ImageInjector:
     ):
         """
         Args:
-            input_tar: 输入OCI镜像tar文件路径（如 demo_apps/mmrotate/mmrotate.tar）
+            input_tar: 输入镜像tar文件路径
             dockerfile: 可选的Dockerfile路径（用于辅助分析入口点）
             config: 配置对象，默认使用全局配置
         """
@@ -32,59 +32,116 @@ class ImageInjector:
         self.config = config or default_config
 
         if not self.input_tar.exists():
-            raise FileNotFoundError(f"Input tar file not found: {self.input_tar}")
+            raise FileNotFoundError("Input tar file not found: {}".format(self.input_tar))
 
-        self._manifest: Optional[list] = None
-        self._image_config: Optional[dict] = None
-        self._config_digest: Optional[str] = None
+        self._is_oci = False
+        self._manifest = None
+        self._oci_index = None
+        self._oci_manifest = None
+        self._image_config = None
+        self._config_digest = None
 
-    def _load_manifest(self, tar: tarfile.TarFile) -> list:
-        """加载manifest.json"""
+    def _detect_format(self, tar):
+        # type: (tarfile.TarFile) -> bool
+        """检测是否为 OCI 格式"""
+        try:
+            tar.getmember("oci-layout")
+            return True
+        except KeyError:
+            return False
+
+    def _load_oci_index(self, tar):
+        # type: (tarfile.TarFile) -> dict
+        """加载 OCI index.json"""
+        index_file = tar.extractfile("index.json")
+        if index_file is None:
+            raise ValueError("index.json not found in OCI tar")
+        return json.load(index_file)
+
+    def _load_oci_manifest(self, tar, digest):
+        # type: (tarfile.TarFile, str) -> dict
+        """加载 OCI manifest"""
+        # digest 格式: sha256:xxx
+        blob_path = "blobs/sha256/{}".format(digest.split(":")[1])
+        manifest_file = tar.extractfile(blob_path)
+        if manifest_file is None:
+            raise ValueError("OCI manifest not found: {}".format(blob_path))
+        return json.load(manifest_file)
+
+    def _load_docker_manifest(self, tar):
+        # type: (tarfile.TarFile) -> list
+        """加载 Docker manifest.json"""
         manifest_file = tar.extractfile("manifest.json")
         if manifest_file is None:
             raise ValueError("manifest.json not found in tar")
         return json.load(manifest_file)
 
-    def _load_image_config(self, tar: tarfile.TarFile) -> dict:
+    def _load_image_config(self, tar, config_digest):
+        # type: (tarfile.TarFile, str) -> dict
         """加载镜像配置文件"""
-        if self._manifest is None:
-            self._manifest = self._load_manifest(tar)
-
-        # manifest.json是一个数组，通常只有一个元素
-        config_path = self._manifest[0]["Config"]
-        self._config_digest = config_path
+        # 处理不同格式的路径
+        if config_digest.startswith("sha256:"):
+            config_path = "blobs/sha256/{}".format(config_digest.split(":")[1])
+        elif config_digest.startswith("blobs/"):
+            config_path = config_digest
+        else:
+            config_path = config_digest
 
         config_file = tar.extractfile(config_path)
         if config_file is None:
-            raise ValueError(f"Config file not found: {config_path}")
+            raise ValueError("Config file not found: {}".format(config_path))
         return json.load(config_file)
 
-    def get_original_entrypoint(self) -> tuple[list, list]:
+    def get_original_entrypoint(self):
+        # type: () -> tuple
         """返回原始的 (ENTRYPOINT, CMD)"""
         with tarfile.open(self.input_tar, "r") as tar:
-            if self._image_config is None:
-                self._image_config = self._load_image_config(tar)
+            self._is_oci = self._detect_format(tar)
+
+            if self._is_oci:
+                self._oci_index = self._load_oci_index(tar)
+                manifest_desc = self._oci_index["manifests"][0]
+                self._oci_manifest = self._load_oci_manifest(tar, manifest_desc["digest"])
+                self._config_digest = self._oci_manifest["config"]["digest"]
+            else:
+                self._manifest = self._load_docker_manifest(tar)
+                self._config_digest = self._manifest[0]["Config"]
+
+            self._image_config = self._load_image_config(tar, self._config_digest)
 
         config = self._image_config.get("config", {})
         entrypoint = config.get("Entrypoint") or []
         cmd = config.get("Cmd") or []
         return entrypoint, cmd
 
-    def is_injected(self) -> bool:
+    def is_injected(self):
+        # type: () -> bool
         """检查镜像是否已经被注入"""
         with tarfile.open(self.input_tar, "r") as tar:
-            if self._image_config is None:
-                self._image_config = self._load_image_config(tar)
+            self._is_oci = self._detect_format(tar)
+
+            if self._is_oci:
+                self._oci_index = self._load_oci_index(tar)
+                manifest_desc = self._oci_index["manifests"][0]
+                self._oci_manifest = self._load_oci_manifest(tar, manifest_desc["digest"])
+                config_digest = self._oci_manifest["config"]["digest"]
+            else:
+                self._manifest = self._load_docker_manifest(tar)
+                config_digest = self._manifest[0]["Config"]
+
+            self._image_config = self._load_image_config(tar, config_digest)
 
         labels = self._image_config.get("config", {}).get("Labels") or {}
         return labels.get(self.config.injected_label) == "true"
 
-    def _get_wrapper_content(self) -> bytes:
+    def _get_wrapper_content(self):
+        # type: () -> bytes
         """获取wrapper程序内容"""
         wrapper_path = Path(__file__).parent / "wrapper" / "checkpoint_wrapper.py"
         return wrapper_path.read_bytes()
 
-    def _parse_dockerfile_entrypoint(self) -> tuple[Optional[list], Optional[list]]:
+    def _parse_dockerfile_entrypoint(self):
+        # type: () -> tuple
         """从Dockerfile解析ENTRYPOINT和CMD（作为备用）"""
         if self.dockerfile is None or not self.dockerfile.exists():
             return None, None
@@ -96,38 +153,28 @@ class ImageInjector:
         for line in content.splitlines():
             line = line.strip()
             if line.upper().startswith("ENTRYPOINT"):
-                # 解析 ENTRYPOINT ["python", "app.py"] 或 ENTRYPOINT python app.py
                 entrypoint = self._parse_dockerfile_instruction(line, "ENTRYPOINT")
             elif line.upper().startswith("CMD"):
                 cmd = self._parse_dockerfile_instruction(line, "CMD")
 
         return entrypoint, cmd
 
-    def _parse_dockerfile_instruction(self, line: str, instruction: str) -> list:
+    def _parse_dockerfile_instruction(self, line, instruction):
+        # type: (str, str) -> list
         """解析Dockerfile指令"""
-        # 移除指令前缀
         value = line[len(instruction):].strip()
 
-        # JSON格式: ["python", "app.py"]
         if value.startswith("["):
             try:
                 return json.loads(value)
             except json.JSONDecodeError:
                 pass
 
-        # Shell格式: python app.py
         return ["sh", "-c", value]
 
-    def _create_layer_tar(self, files: dict[str, bytes]) -> bytes:
-        """
-        创建一个新的layer tar（未压缩）
-
-        Args:
-            files: {文件路径: 文件内容} 字典
-
-        Returns:
-            tar文件的bytes内容
-        """
+    def _create_layer_tar(self, files):
+        # type: (dict) -> bytes
+        """创建一个新的layer tar（未压缩）"""
         tar_buffer = io.BytesIO()
 
         with tarfile.open(fileobj=tar_buffer, mode="w") as tar:
@@ -152,28 +199,25 @@ class ImageInjector:
 
         return tar_buffer.getvalue()
 
-    def _calculate_digest(self, content: bytes) -> str:
+    def _calculate_digest(self, content):
+        # type: (bytes) -> str
         """计算sha256摘要"""
         return hashlib.sha256(content).hexdigest()
 
     def inject(
         self,
-        output_tar: str,
-        force: bool = False,
-        tag_suffix: str = "-wrapped",
-    ) -> str:
+        output_tar,
+        force=False,
+        tag_suffix="-wrapped",
+    ):
+        # type: (str, bool, str) -> str
         """
         执行注入，返回输出tar文件路径
-
-        注入内容：
-        1. wrapper程序（作为新layer）
-        2. 原始ENTRYPOINT/CMD保存到环境变量
-        3. 替换ENTRYPOINT为wrapper
 
         Args:
             output_tar: 输出tar文件路径
             force: 是否强制覆盖已存在的文件
-            tag_suffix: 镜像标签后缀（默认 "-wrapped"），设为 None 保持原名
+            tag_suffix: 镜像标签后缀（默认 "-wrapped"），设为 None 或空字符串保持原名
 
         Returns:
             输出tar文件路径
@@ -182,25 +226,33 @@ class ImageInjector:
 
         if output_path.exists() and not force:
             raise FileExistsError(
-                f"Output file '{output_tar}' already exists. Use --force to overwrite."
+                "Output file '{}' already exists. Use --force to overwrite.".format(output_tar)
             )
 
-        # 创建临时目录
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir = Path(tmpdir)
 
             # 解压原始tar
             with tarfile.open(self.input_tar, "r") as tar:
                 tar.extractall(tmpdir)
-                self._manifest = self._load_manifest(tar)
-                self._image_config = self._load_image_config(tar)
+                self._is_oci = self._detect_format(tar)
+
+                if self._is_oci:
+                    self._oci_index = self._load_oci_index(tar)
+                    manifest_desc = self._oci_index["manifests"][0]
+                    self._oci_manifest = self._load_oci_manifest(tar, manifest_desc["digest"])
+                    self._config_digest = self._oci_manifest["config"]["digest"]
+                else:
+                    self._manifest = self._load_docker_manifest(tar)
+                    self._config_digest = self._manifest[0]["Config"]
+
+                self._image_config = self._load_image_config(tar, self._config_digest)
 
             # 获取原始入口点
             config = self._image_config.get("config", {})
             original_entrypoint = config.get("Entrypoint") or []
             original_cmd = config.get("Cmd") or []
 
-            # 如果镜像没有入口点，尝试从Dockerfile解析
             if not original_entrypoint and not original_cmd:
                 df_entrypoint, df_cmd = self._parse_dockerfile_entrypoint()
                 if df_entrypoint:
@@ -211,7 +263,7 @@ class ImageInjector:
             entrypoint_json = json.dumps(original_entrypoint)
             cmd_json = json.dumps(original_cmd)
 
-            # 创建新layer（包含wrapper程序）
+            # 创建新layer
             wrapper_content = self._get_wrapper_content()
             wrapper_path = self.config.wrapper_install_path.lstrip("/")
 
@@ -219,60 +271,52 @@ class ImageInjector:
                 wrapper_path: wrapper_content,
             })
 
-            # 计算未压缩layer的diff_id (sha256)
-            new_layer_diff_id = f"sha256:{self._calculate_digest(new_layer_tar)}"
+            # 计算 diff_id（未压缩 tar 的 sha256）
+            new_layer_diff_id = "sha256:{}".format(self._calculate_digest(new_layer_tar))
 
             # 压缩新layer
             new_layer_gz = gzip.compress(new_layer_tar)
-            new_layer_digest = self._calculate_digest(new_layer_gz)
-            new_layer_filename = f"{new_layer_digest}.tar.gz"
+            new_layer_digest = "sha256:{}".format(self._calculate_digest(new_layer_gz))
 
-            # 写入新layer文件
-            (tmpdir / new_layer_filename).write_bytes(new_layer_gz)
+            # 写入新layer到 blobs 目录
+            blobs_dir = tmpdir / "blobs" / "sha256"
+            blobs_dir.mkdir(parents=True, exist_ok=True)
+            new_layer_blob_path = blobs_dir / new_layer_digest.split(":")[1]
+            new_layer_blob_path.write_bytes(new_layer_gz)
 
             # 更新镜像配置
-            self._update_image_config(
-                entrypoint_json=entrypoint_json,
-                cmd_json=cmd_json,
-                new_layer_diff_id=new_layer_diff_id,
-            )
+            self._update_image_config(entrypoint_json, cmd_json, new_layer_diff_id)
 
-            # 写入新配置文件
-            new_config_json = json.dumps(self._image_config, indent=2).encode()
-            new_config_digest = self._calculate_digest(new_config_json)
-            new_config_filename = f"{new_config_digest}.json"
+            # 写入新配置到 blobs
+            new_config_json = json.dumps(self._image_config).encode()
+            new_config_digest = "sha256:{}".format(self._calculate_digest(new_config_json))
+            new_config_blob_path = blobs_dir / new_config_digest.split(":")[1]
+            new_config_blob_path.write_bytes(new_config_json)
 
             # 删除旧配置文件
-            old_config_path = tmpdir / self._config_digest
+            if self._config_digest.startswith("sha256:"):
+                old_config_path = blobs_dir / self._config_digest.split(":")[1]
+            elif self._config_digest.startswith("blobs/"):
+                old_config_path = tmpdir / self._config_digest
+            else:
+                old_config_path = tmpdir / self._config_digest
+
             if old_config_path.exists():
                 old_config_path.unlink()
 
-            # 写入新配置文件
-            (tmpdir / new_config_filename).write_bytes(new_config_json)
+            # 获取原始镜像名用于生成新标签
+            original_image_name = self._get_original_image_name()
+            new_image_name = self._generate_new_image_name(original_image_name, tag_suffix)
 
-            # 更新manifest.json
-            self._manifest[0]["Config"] = new_config_filename
-            self._manifest[0]["Layers"].append(new_layer_filename)
-
-            # 更新镜像标签
-            if "RepoTags" in self._manifest[0] and self._manifest[0]["RepoTags"]:
-                if tag_suffix:
-                    # 给每个标签添加后缀
-                    new_tags = []
-                    for tag in self._manifest[0]["RepoTags"]:
-                        if ":" in tag:
-                            name, version = tag.rsplit(":", 1)
-                            new_tags.append("{}{}:{}".format(name, tag_suffix, version))
-                        else:
-                            new_tags.append("{}{}".format(tag, tag_suffix))
-                    self._manifest[0]["RepoTags"] = new_tags
-                # 如果 tag_suffix 为 None，保持原标签不变
+            if self._is_oci:
+                self._update_oci_format(
+                    tmpdir, blobs_dir, new_config_digest, new_layer_digest,
+                    len(new_config_json), len(new_layer_gz), new_image_name
+                )
             else:
-                self._manifest[0]["RepoTags"] = ["satcontainer-injected:latest"]
-
-            (tmpdir / "manifest.json").write_text(
-                json.dumps(self._manifest, indent=2)
-            )
+                self._update_docker_format(
+                    tmpdir, new_config_digest, new_layer_digest, new_image_name
+                )
 
             # 打包新tar
             output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -282,29 +326,111 @@ class ImageInjector:
 
         return str(output_path)
 
-    def _update_image_config(
-        self,
-        entrypoint_json: str,
-        cmd_json: str,
-        new_layer_diff_id: str,
-    ) -> None:
+    def _get_original_image_name(self):
+        # type: () -> str
+        """获取原始镜像名称"""
+        if self._is_oci and self._oci_index:
+            manifest_desc = self._oci_index["manifests"][0]
+            annotations = manifest_desc.get("annotations", {})
+            name = annotations.get("io.containerd.image.name", "")
+            if name:
+                # 去掉 docker.io/library/ 前缀
+                if name.startswith("docker.io/library/"):
+                    name = name[len("docker.io/library/"):]
+                return name
+
+        if self._manifest:
+            tags = self._manifest[0].get("RepoTags", [])
+            if tags:
+                return tags[0]
+
+        return "injected:latest"
+
+    def _generate_new_image_name(self, original_name, tag_suffix):
+        # type: (str, str) -> str
+        """生成新镜像名称"""
+        if not tag_suffix:
+            return original_name
+
+        if ":" in original_name:
+            name, version = original_name.rsplit(":", 1)
+            return "{}{}:{}".format(name, tag_suffix, version)
+        else:
+            return "{}{}".format(original_name, tag_suffix)
+
+    def _update_oci_format(self, tmpdir, blobs_dir, new_config_digest, new_layer_digest,
+                           config_size, layer_size, new_image_name):
+        # type: (Path, Path, str, str, int, int, str) -> None
+        """更新 OCI 格式的元数据"""
+        # 更新 OCI manifest
+        self._oci_manifest["config"]["digest"] = new_config_digest
+        self._oci_manifest["config"]["size"] = config_size
+
+        self._oci_manifest["layers"].append({
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": new_layer_digest,
+            "size": layer_size,
+        })
+
+        # 写入新 manifest 到 blobs
+        new_manifest_json = json.dumps(self._oci_manifest).encode()
+        new_manifest_digest = "sha256:{}".format(self._calculate_digest(new_manifest_json))
+        new_manifest_blob_path = blobs_dir / new_manifest_digest.split(":")[1]
+        new_manifest_blob_path.write_bytes(new_manifest_json)
+
+        # 删除旧 manifest
+        old_manifest_digest = self._oci_index["manifests"][0]["digest"]
+        old_manifest_path = blobs_dir / old_manifest_digest.split(":")[1]
+        if old_manifest_path.exists():
+            old_manifest_path.unlink()
+
+        # 更新 index.json
+        self._oci_index["manifests"][0]["digest"] = new_manifest_digest
+        self._oci_index["manifests"][0]["size"] = len(new_manifest_json)
+
+        # 更新 annotations 中的镜像名
+        annotations = self._oci_index["manifests"][0].setdefault("annotations", {})
+        annotations["io.containerd.image.name"] = "docker.io/library/{}".format(new_image_name)
+        if ":" in new_image_name:
+            annotations["org.opencontainers.image.ref.name"] = new_image_name.split(":")[1]
+
+        (tmpdir / "index.json").write_text(json.dumps(self._oci_index, indent=2))
+
+        # 同时更新 Docker 格式的 manifest.json（保持兼容）
+        if (tmpdir / "manifest.json").exists():
+            docker_manifest = json.loads((tmpdir / "manifest.json").read_text())
+            docker_manifest[0]["Config"] = "blobs/sha256/{}".format(new_config_digest.split(":")[1])
+            docker_manifest[0]["Layers"].append("blobs/sha256/{}".format(new_layer_digest.split(":")[1]))
+            docker_manifest[0]["RepoTags"] = [new_image_name]
+            (tmpdir / "manifest.json").write_text(json.dumps(docker_manifest, indent=2))
+
+    def _update_docker_format(self, tmpdir, new_config_digest, new_layer_digest, new_image_name):
+        # type: (Path, str, str, str) -> None
+        """更新 Docker 格式的 manifest.json"""
+        self._manifest[0]["Config"] = new_config_digest
+        self._manifest[0]["Layers"].append(new_layer_digest)
+        self._manifest[0]["RepoTags"] = [new_image_name]
+
+        (tmpdir / "manifest.json").write_text(json.dumps(self._manifest, indent=2))
+
+    def _update_image_config(self, entrypoint_json, cmd_json, new_layer_diff_id):
+        # type: (str, str, str) -> None
         """更新镜像配置"""
         config = self._image_config.setdefault("config", {})
 
         # 更新环境变量
         env = config.setdefault("Env", [])
-
-        # 移除已存在的相关环境变量
-        env = [e for e in env if not e.startswith(f"{self.config.original_entrypoint_env}=")
-               and not e.startswith(f"{self.config.original_cmd_env}=")]
-
-        # 添加新的环境变量
-        env.append(f"{self.config.original_entrypoint_env}={entrypoint_json}")
-        env.append(f"{self.config.original_cmd_env}={cmd_json}")
+        env = [e for e in env if not e.startswith("{}=".format(self.config.original_entrypoint_env))
+               and not e.startswith("{}=".format(self.config.original_cmd_env))]
+        env.append("{}={}".format(self.config.original_entrypoint_env, entrypoint_json))
+        env.append("{}={}".format(self.config.original_cmd_env, cmd_json))
         config["Env"] = env
 
         # 更新Labels
         labels = config.setdefault("Labels", {})
+        if labels is None:
+            labels = {}
+            config["Labels"] = labels
         labels[self.config.injected_label] = "true"
         labels[self.config.version_label] = "0.1.0"
 
@@ -312,11 +438,11 @@ class ImageInjector:
         config["Entrypoint"] = ["python3", self.config.wrapper_install_path]
         config["Cmd"] = []
 
-        # 更新rootfs的diff_ids - 添加新layer的diff_id
+        # 更新 rootfs diff_ids
         rootfs = self._image_config.setdefault("rootfs", {"type": "layers", "diff_ids": []})
         rootfs["diff_ids"].append(new_layer_diff_id)
 
-        # 更新history
+        # 更新 history
         history = self._image_config.setdefault("history", [])
         history.append({
             "created_by": "satcontainer inject - add checkpoint wrapper",
