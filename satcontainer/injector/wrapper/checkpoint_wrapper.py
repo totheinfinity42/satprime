@@ -5,11 +5,16 @@
 自动分析原始入口脚本的import语句，导入依赖后发出检查点信号。
 通过直接执行脚本（而非exec新进程）来保留预加载的模块。
 
+启动参数优先级：
+    1. 配置文件 /etc/satcontainer/run.json（用于 restore 时修改参数）
+    2. wrapper 的命令行参数（正常启动时使用）
+
 环境变量:
     CHECKPOINT_ENABLED: "1" 启用检查点模式（阻塞等待）
     ORIGINAL_ENTRYPOINT: JSON格式的原始入口点
     ORIGINAL_CMD: JSON格式的原始CMD
     CHECKPOINT_READY_FILE: ready标记文件路径（默认/tmp/checkpoint_ready）
+    SATCONTAINER_CONFIG_DIR: 配置文件目录（默认/etc/satcontainer）
 """
 
 from __future__ import annotations
@@ -28,6 +33,10 @@ from typing import Dict, List, Optional
 
 LOG_PREFIX = "[SatContainer]"
 
+# 默认配置目录和文件
+DEFAULT_CONFIG_DIR = "/etc/satcontainer"
+RUN_CONFIG_FILE = "run.json"
+
 
 def log(msg):
     # type: (str) -> None
@@ -41,12 +50,93 @@ def log_error(msg):
     print("{} ERROR: {}".format(LOG_PREFIX, msg), file=sys.stderr, flush=True)
 
 
+class RunConfig:
+    """
+    运行配置 - 用于 restore 时修改启动参数
+
+    配置文件格式 (/etc/satcontainer/run.json):
+    {
+        "args": ["arg1", "arg2", "--flag", "value"],  // 脚本参数（可选）
+        "env": {                                       // 额外环境变量（可选）
+            "KEY": "value"
+        },
+        "workdir": "/path/to/workdir"                  // 工作目录（可选）
+    }
+    """
+
+    def __init__(self, config_dir=None):
+        # type: (Optional[str]) -> None
+        self.config_dir = config_dir or os.environ.get("SATCONTAINER_CONFIG_DIR", DEFAULT_CONFIG_DIR)
+        self.config_file = os.path.join(self.config_dir, RUN_CONFIG_FILE)
+        self._config = None
+
+    def exists(self):
+        # type: () -> bool
+        """检查配置文件是否存在"""
+        return os.path.isfile(self.config_file)
+
+    def load(self):
+        # type: () -> bool
+        """加载配置文件，返回是否成功"""
+        if not self.exists():
+            return False
+
+        try:
+            with open(self.config_file, "r") as f:
+                self._config = json.load(f)
+            log("Loaded run config from: {}".format(self.config_file))
+            return True
+        except Exception as e:
+            log_error("Failed to load config {}: {}".format(self.config_file, e))
+            return False
+
+    def get_args(self):
+        # type: () -> Optional[List[str]]
+        """获取启动参数，如果未配置返回 None"""
+        if self._config is None:
+            return None
+        return self._config.get("args")
+
+    def get_env(self):
+        # type: () -> Optional[Dict[str, str]]
+        """获取额外环境变量"""
+        if self._config is None:
+            return None
+        return self._config.get("env")
+
+    def get_workdir(self):
+        # type: () -> Optional[str]
+        """获取工作目录"""
+        if self._config is None:
+            return None
+        return self._config.get("workdir")
+
+    def apply_env(self):
+        # type: () -> None
+        """应用环境变量配置"""
+        env = self.get_env()
+        if env:
+            for key, value in env.items():
+                os.environ[key] = str(value)
+                log("Set env: {}={}".format(key, value))
+
+    def apply_workdir(self):
+        # type: () -> None
+        """应用工作目录配置"""
+        workdir = self.get_workdir()
+        if workdir and os.path.isdir(workdir):
+            os.chdir(workdir)
+            log("Changed workdir to: {}".format(workdir))
+
+
 class CheckpointWrapper:
     """
     检查点wrapper - 在容器内运行
 
     自动分析原始入口脚本的import语句，导入依赖后发出检查点信号。
     通过在同一进程内执行脚本来保留预加载的模块。
+
+    支持从配置文件读取启动参数，用于 restore 时修改参数。
     """
 
     def __init__(self):
@@ -60,6 +150,9 @@ class CheckpointWrapper:
         self.original_cmd = json.loads(
             os.environ.get("ORIGINAL_CMD", "[]")
         )
+
+        # 运行配置
+        self.run_config = RunConfig()
 
     def find_python_script(self, args):
         # type: (List[str]) -> tuple
@@ -215,6 +308,42 @@ class CheckpointWrapper:
         except Exception:
             pass
 
+    def get_effective_args(self, extra_args):
+        # type: (List[str]) -> List[str]
+        """
+        获取有效的启动参数
+
+        优先级：
+        1. 配置文件中的 args
+        2. wrapper 的命令行参数 (extra_args)
+        3. 原始 CMD
+
+        Returns:
+            脚本参数列表
+        """
+        # 尝试从配置文件加载
+        if self.run_config.load():
+            config_args = self.run_config.get_args()
+            if config_args is not None:
+                log("Using args from config file: {}".format(config_args))
+                # 应用环境变量和工作目录
+                self.run_config.apply_env()
+                self.run_config.apply_workdir()
+                return config_args
+            else:
+                log("Config file exists but no 'args' specified, using default")
+                # 仍然应用环境变量和工作目录
+                self.run_config.apply_env()
+                self.run_config.apply_workdir()
+
+        # 使用传入的参数或默认 CMD
+        if extra_args:
+            log("Using wrapper args: {}".format(extra_args))
+            return extra_args
+        else:
+            log("Using original CMD: {}".format(self.original_cmd))
+            return self.original_cmd
+
     def run_script_in_process(self, script_path, script_args):
         # type: (str, List[str]) -> None
         """
@@ -237,19 +366,15 @@ class CheckpointWrapper:
             # 脚本正常退出
             sys.exit(e.code if e.code is not None else 0)
 
-    def exec_original(self, extra_args):
+    def exec_original(self, script_args):
         # type: (List[str]) -> None
         """
         执行原始入口程序（用于非Python脚本或无法在进程内执行的情况）
 
         Args:
-            extra_args: 运行时额外参数
+            script_args: 脚本参数
         """
-        # 构建命令：ENTRYPOINT + (extra_args如果有，否则CMD)
-        if extra_args:
-            args = self.original_entrypoint + extra_args
-        else:
-            args = self.original_entrypoint + self.original_cmd
+        args = self.original_entrypoint + script_args
 
         if not args:
             log_error("No original entrypoint or command to execute")
@@ -272,20 +397,20 @@ class CheckpointWrapper:
         主流程
 
         Args:
-            extra_args: 运行时额外参数（docker run时传入）
+            extra_args: 运行时额外参数（docker run/ctr run 时传入）
         """
         log("Checkpoint wrapper starting...")
         log("Original ENTRYPOINT: {}".format(self.original_entrypoint))
         log("Original CMD: {}".format(self.original_cmd))
         log("Extra args: {}".format(extra_args))
         log("Checkpoint enabled: {}".format(self.checkpoint_enabled))
+        log("Config file: {}".format(self.run_config.config_file))
+
+        # 获取有效的脚本参数（优先从配置文件读取）
+        effective_args = self.get_effective_args(extra_args)
 
         # 构建完整命令
-        # Docker行为：如果用户提供了参数，会替换CMD
-        if extra_args:
-            full_cmd = self.original_entrypoint + extra_args
-        else:
-            full_cmd = self.original_entrypoint + self.original_cmd
+        full_cmd = self.original_entrypoint + effective_args
 
         log("Full command: {}".format(full_cmd))
 
@@ -317,6 +442,13 @@ class CheckpointWrapper:
                 log("Checkpoint mode enabled, blocking...")
                 self.signal_ready_and_block()
 
+                # 阻塞恢复后，重新读取配置文件（支持 restore 时修改参数）
+                log("Re-checking config file after resume...")
+                effective_args = self.get_effective_args(extra_args)
+                full_cmd = self.original_entrypoint + effective_args
+                script_path, script_args = self.find_python_script(full_cmd)
+                log("Final command after resume: {}".format(full_cmd))
+
             # 在当前进程内执行脚本（保留预加载的模块）
             self.run_script_in_process(script_path, script_args or [])
 
@@ -328,8 +460,12 @@ class CheckpointWrapper:
                 log("Checkpoint mode enabled, blocking...")
                 self.signal_ready_and_block()
 
+                # 阻塞恢复后，重新读取配置文件
+                log("Re-checking config file after resume...")
+                effective_args = self.get_effective_args(extra_args)
+
             # 非Python脚本，使用exec
-            self.exec_original(extra_args)
+            self.exec_original(effective_args)
 
 
 def main():
