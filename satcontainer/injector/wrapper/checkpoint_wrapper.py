@@ -28,6 +28,7 @@ import signal
 import sys
 import time
 import runpy
+from datetime import datetime
 from typing import Dict, List, Optional
 
 
@@ -38,16 +39,22 @@ DEFAULT_CONFIG_DIR = "/etc/satcontainer"
 RUN_CONFIG_FILE = "run.json"
 
 
+def _get_timestamp():
+    # type: () -> str
+    """获取当前时间戳"""
+    return datetime.now().strftime("%H:%M:%S.%f")[:-3]
+
+
 def log(msg):
     # type: (str) -> None
-    """输出带前缀的日志"""
-    print("{} {}".format(LOG_PREFIX, msg), flush=True)
+    """输出带前缀和时间的日志"""
+    print("[{}] {} {}".format(_get_timestamp(), LOG_PREFIX, msg), flush=True)
 
 
 def log_error(msg):
     # type: (str) -> None
     """输出错误日志"""
-    print("{} ERROR: {}".format(LOG_PREFIX, msg), file=sys.stderr, flush=True)
+    print("[{}] {} ERROR: {}".format(_get_timestamp(), LOG_PREFIX, msg), file=sys.stderr, flush=True)
 
 
 class RunConfig:
