@@ -428,6 +428,13 @@ class CheckpointWrapper:
             log("Found Python script: {}".format(script_path))
             log("Script arguments: {}".format(script_args))
 
+            # 将脚本所在目录加入 sys.path，使本地模块（如 models, utils）
+            # 也能在 preload 阶段被 importlib 找到
+            script_dir = os.path.dirname(os.path.abspath(script_path))
+            if script_dir not in sys.path:
+                sys.path.insert(0, script_dir)
+                log("Added script dir to sys.path: {}".format(script_dir))
+
             # AST分析import语句
             log("Analyzing imports in {}...".format(script_path))
             modules = self.analyze_imports(script_path)
