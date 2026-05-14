@@ -1,1 +1,3 @@
 demo_apps/*/*.tar
+__pycache__/
+*.pyc
