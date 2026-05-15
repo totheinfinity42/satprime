@@ -46,32 +46,53 @@ class TestCheckpointWrapper(unittest.TestCase):
         wrapper = CheckpointWrapper()
 
         # python script.py
-        result = wrapper.find_python_script(["python", "app.py"])
-        self.assertEqual(result, "app.py")
+        path, args, module = wrapper.find_python_script(["python", "app.py"])
+        self.assertEqual(path, "app.py")
+        self.assertEqual(args, [])
+        self.assertIsNone(module)
 
         # python3 script.py
-        result = wrapper.find_python_script(["python3", "main.py"])
-        self.assertEqual(result, "main.py")
+        path, args, module = wrapper.find_python_script(["python3", "main.py"])
+        self.assertEqual(path, "main.py")
+        self.assertEqual(args, [])
+        self.assertIsNone(module)
 
     def test_find_python_script_with_flags(self):
         """测试带参数的脚本查找"""
         wrapper = CheckpointWrapper()
 
         # python -u script.py
-        result = wrapper.find_python_script(["python", "-u", "app.py"])
-        self.assertEqual(result, "app.py")
+        path, args, module = wrapper.find_python_script(["python", "-u", "app.py"])
+        self.assertEqual(path, "app.py")
+        self.assertEqual(args, [])
+        self.assertIsNone(module)
 
         # python -B -O script.py
-        result = wrapper.find_python_script(["python", "-B", "-O", "main.py"])
-        self.assertEqual(result, "main.py")
+        path, args, module = wrapper.find_python_script(["python", "-B", "-O", "main.py"])
+        self.assertEqual(path, "main.py")
+        self.assertEqual(args, [])
+        self.assertIsNone(module)
 
     def test_find_python_script_module_mode(self):
-        """测试模块模式返回None"""
+        """测试模块模式支持"""
         wrapper = CheckpointWrapper()
 
-        # python -m module
-        result = wrapper.find_python_script(["python", "-m", "pytest"])
-        self.assertIsNone(result)
+        # python -m json.tool
+        # json 模块肯定存在于标准库中
+        path, args, module = wrapper.find_python_script(["python", "-m", "json.tool", "test.json"])
+        self.assertIsNotNone(path)
+        self.assertTrue(path.endswith(".py"))
+        self.assertEqual(module, "json.tool")
+        self.assertEqual(args, ["test.json"])
+
+    def test_find_python_script_invalid_module(self):
+        """测试无效模块"""
+        wrapper = CheckpointWrapper()
+
+        # python -m non_existent_module_xyz
+        path, args, module = wrapper.find_python_script(["python", "-m", "non_existent_module_xyz"])
+        self.assertIsNone(path)
+        self.assertIsNone(module)
 
     def test_analyze_imports(self):
         """测试import分析"""

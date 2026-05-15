@@ -167,10 +167,10 @@ class CheckpointWrapper:
         从命令行参数中找到Python脚本路径和脚本参数
 
         Returns:
-            (script_path, script_args) 或 (None, None)
+            (script_path, script_args, module_name) 或 (None, None, None)
         """
         if not args:
-            return None, None
+            return None, None, None
 
         i = 0
         while i < len(args):
@@ -192,13 +192,25 @@ class CheckpointWrapper:
                 i += 2
                 continue
 
-            # -c 和 -m 不是脚本文件
-            if arg in ("-c", "-m"):
-                return None, None
+            # -c 不是脚本文件
+            if arg == "-c":
+                return None, None, None
+
+            # -m 处理模块
+            if arg == "-m":
+                if i + 1 < len(args):
+                    module_name = args[i+1]
+                    try:
+                        spec = importlib.util.find_spec(module_name)
+                        if spec and spec.origin and spec.origin.endswith(".py"):
+                            return spec.origin, args[i+2:], module_name
+                    except Exception as e:
+                        log_error("Failed to find module {}: {}".format(module_name, e))
+                return None, None, None
 
             # 找到脚本文件
             if arg.endswith(".py"):
-                return arg, args[i+1:]
+                return arg, args[i+1:], None
 
             # 可能是可执行脚本
             if os.path.isfile(arg):
@@ -206,21 +218,21 @@ class CheckpointWrapper:
                     with open(arg, "r") as f:
                         first_line = f.readline()
                         if "python" in first_line:
-                            return arg, args[i+1:]
+                            return arg, args[i+1:], None
                 except Exception:
                     pass
 
             i += 1
 
-        return None, None
+        return None, None, None
 
     def analyze_imports(self, script_path):
         # type: (str) -> List[str]
         """
-        使用AST分析Python脚本的import语句，收集完整模块路径
+        使用AST分析Python脚本的import语句
 
         Returns:
-            完整模块路径列表，如 ['torch.backends.cudnn', 'models.common', 'utils.datasets']
+            顶层模块名列表，如 ['torch', 'numpy', 'PIL']
         """
         try:
             with open(script_path, "r") as f:
@@ -235,15 +247,14 @@ class CheckpointWrapper:
 
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
-                # import torch, import torch.backends.cudnn as cudnn
                 for alias in node.names:
-                    modules.add(alias.name)
+                    top_module = alias.name.split(".")[0]
+                    modules.add(top_module)
 
             elif isinstance(node, ast.ImportFrom):
-                # from models.common import DetectMultiBackend → models.common
-                # 跳过相对导入 (from .something import X)
                 if node.module and not node.module.startswith("."):
-                    modules.add(node.module)
+                    top_module = node.module.split(".")[0]
+                    modules.add(top_module)
 
         return sorted(modules)
 
@@ -352,27 +363,34 @@ class CheckpointWrapper:
             log("Using original CMD: {}".format(self.original_cmd))
             return self.original_cmd
 
-    def run_script_in_process(self, script_path, script_args):
-        # type: (str, List[str]) -> None
+    def run_script_in_process(self, script_path, script_args, module_name=None):
+        # type: (str, List[str], Optional[str]) -> None
         """
         在当前进程内执行Python脚本，保留已加载的模块
 
         Args:
             script_path: 脚本路径
             script_args: 脚本参数
+            module_name: 如果是通过 -m 启动，则为模块名
         """
         # 设置sys.argv为脚本期望的格式
         sys.argv = [script_path] + script_args
 
-        log("Running script in-process: {} {}".format(script_path, " ".join(script_args)))
-
-        # 使用runpy在当前进程中执行脚本
-        # run_path会将脚本作为__main__模块执行
-        try:
-            runpy.run_path(script_path, run_name="__main__")
-        except SystemExit as e:
-            # 脚本正常退出
-            sys.exit(e.code if e.code is not None else 0)
+        if module_name:
+            log("Running module in-process: {} (path: {}) {}".format(
+                module_name, script_path, " ".join(script_args)))
+            # 使用 run_module 执行模块
+            try:
+                runpy.run_module(module_name, run_name="__main__", alter_sys=True)
+            except SystemExit as e:
+                sys.exit(e.code if e.code is not None else 0)
+        else:
+            log("Running script in-process: {} {}".format(script_path, " ".join(script_args)))
+            # 使用 run_path 执行脚本
+            try:
+                runpy.run_path(script_path, run_name="__main__")
+            except SystemExit as e:
+                sys.exit(e.code if e.code is not None else 0)
 
     def exec_original(self, script_args):
         # type: (List[str]) -> None
@@ -414,7 +432,7 @@ class CheckpointWrapper:
         log("Checkpoint enabled: {}".format(self.checkpoint_enabled))
         log("Config file: {}".format(self.run_config.config_file))
 
-        # 获取有效的脚本参数（优先从配置文件读取）
+        # 获取有效的启动参数（优先从配置文件读取）
         effective_args = self.get_effective_args(extra_args)
 
         # 构建完整命令
@@ -423,11 +441,13 @@ class CheckpointWrapper:
         log("Full command: {}".format(full_cmd))
 
         # 查找Python脚本
-        script_path, script_args = self.find_python_script(full_cmd)
+        script_path, script_args, module_name = self.find_python_script(full_cmd)
 
         if script_path and os.path.isfile(script_path):
             log("Found Python script: {}".format(script_path))
             log("Script arguments: {}".format(script_args))
+            if module_name:
+                log("Module name: {}".format(module_name))
 
             # 将脚本所在目录加入 sys.path，使本地模块（如 models, utils）
             # 也能在 preload 阶段被 importlib 找到
@@ -461,11 +481,11 @@ class CheckpointWrapper:
                 log("Re-checking config file after resume...")
                 effective_args = self.get_effective_args(extra_args)
                 full_cmd = self.original_entrypoint + effective_args
-                script_path, script_args = self.find_python_script(full_cmd)
+                script_path, script_args, module_name = self.find_python_script(full_cmd)
                 log("Final command after resume: {}".format(full_cmd))
 
             # 在当前进程内执行脚本（保留预加载的模块）
-            self.run_script_in_process(script_path, script_args or [])
+            self.run_script_in_process(script_path, script_args or [], module_name)
 
         else:
             log("No Python script found or script not exists, using exec")
