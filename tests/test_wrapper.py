@@ -116,8 +116,8 @@ from torchvision.models import resnet50
             self.assertIn("numpy", modules)
             self.assertIn("PIL", modules)
             self.assertIn("collections", modules)
-            self.assertIn("os", modules)
-            self.assertIn("torchvision", modules)
+            self.assertIn("os.path", modules)
+            self.assertIn("torchvision.models", modules)
         finally:
             os.unlink(temp_path)
 
@@ -171,11 +171,9 @@ from torchvision.transforms.v2 import Compose
 
         try:
             modules = wrapper.analyze_imports(temp_path)
-            # 应该只返回顶层模块
-            self.assertIn("torch", modules)
-            self.assertIn("torchvision", modules)
-            self.assertNotIn("torch.nn", modules)
-            self.assertNotIn("torch.nn.functional", modules)
+            # 应该返回完整的模块路径
+            self.assertIn("torch.nn.functional", modules)
+            self.assertIn("torchvision.transforms.v2", modules)
         finally:
             os.unlink(temp_path)
 

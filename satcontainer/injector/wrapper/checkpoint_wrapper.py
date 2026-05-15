@@ -229,10 +229,10 @@ class CheckpointWrapper:
     def analyze_imports(self, script_path):
         # type: (str) -> List[str]
         """
-        使用AST分析Python脚本的import语句
+        使用AST分析Python脚本的import语句，收集完整模块路径
 
         Returns:
-            顶层模块名列表，如 ['torch', 'numpy', 'PIL']
+            完整模块路径列表，如 ['torch.backends.cudnn', 'models.common', 'utils.datasets']
         """
         try:
             with open(script_path, "r") as f:
@@ -248,13 +248,11 @@ class CheckpointWrapper:
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
-                    top_module = alias.name.split(".")[0]
-                    modules.add(top_module)
+                    modules.add(alias.name)
 
             elif isinstance(node, ast.ImportFrom):
                 if node.module and not node.module.startswith("."):
-                    top_module = node.module.split(".")[0]
-                    modules.add(top_module)
+                    modules.add(node.module)
 
         return sorted(modules)
 
