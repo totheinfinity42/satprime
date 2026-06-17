@@ -1,4 +1,4 @@
-"""ImageInjector 单元测试"""
+"""Tests for ImageInjector."""
 
 import gzip
 import hashlib
@@ -10,16 +10,14 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from satcontainer.injector.inject import ImageInjector
+from satecode.runtime import ImagePatcher as ImageInjector
 
 
 def create_test_image_tar(tmpdir: Path, entrypoint: list = None, cmd: list = None) -> Path:
-    """创建一个测试用的OCI镜像tar文件"""
-    # 创建镜像配置
+    """Build a minimal Docker-format image tar for testing."""
     image_config = {
         "config": {
             "Entrypoint": entrypoint,
@@ -27,10 +25,7 @@ def create_test_image_tar(tmpdir: Path, entrypoint: list = None, cmd: list = Non
             "Env": ["PATH=/usr/local/bin:/usr/bin:/bin"],
             "Labels": {},
         },
-        "rootfs": {
-            "type": "layers",
-            "diff_ids": [],
-        },
+        "rootfs": {"type": "layers", "diff_ids": []},
         "history": [],
     }
 
@@ -38,10 +33,8 @@ def create_test_image_tar(tmpdir: Path, entrypoint: list = None, cmd: list = Non
     config_digest = hashlib.sha256(config_json).hexdigest()
     config_filename = f"{config_digest}.json"
 
-    # 创建一个空的layer
     layer_buffer = io.BytesIO()
     with tarfile.open(fileobj=layer_buffer, mode="w") as layer_tar:
-        # 添加一个dummy文件
         info = tarfile.TarInfo(name="app/dummy.txt")
         content = b"test content"
         info.size = len(content)
@@ -52,27 +45,22 @@ def create_test_image_tar(tmpdir: Path, entrypoint: list = None, cmd: list = Non
     layer_digest = hashlib.sha256(layer_gz).hexdigest()
     layer_filename = f"{layer_digest}.tar.gz"
 
-    # 创建manifest
     manifest = [{
         "Config": config_filename,
         "RepoTags": ["test:latest"],
         "Layers": [layer_filename],
     }]
 
-    # 打包成tar
     tar_path = tmpdir / "test_image.tar"
     with tarfile.open(tar_path, "w") as tar:
-        # 添加config
         config_info = tarfile.TarInfo(name=config_filename)
         config_info.size = len(config_json)
         tar.addfile(config_info, io.BytesIO(config_json))
 
-        # 添加layer
         layer_info = tarfile.TarInfo(name=layer_filename)
         layer_info.size = len(layer_gz)
         tar.addfile(layer_info, io.BytesIO(layer_gz))
 
-        # 添加manifest
         manifest_json = json.dumps(manifest).encode()
         manifest_info = tarfile.TarInfo(name="manifest.json")
         manifest_info.size = len(manifest_json)
@@ -82,168 +70,107 @@ def create_test_image_tar(tmpdir: Path, entrypoint: list = None, cmd: list = Non
 
 
 class TestImageInjector(unittest.TestCase):
-    """ImageInjector 测试"""
 
     def setUp(self):
-        """创建临时目录"""
         self.tmpdir = tempfile.mkdtemp()
         self.tmpdir_path = Path(self.tmpdir)
 
     def tearDown(self):
-        """清理临时目录"""
         import shutil
         shutil.rmtree(self.tmpdir)
 
     def test_get_original_entrypoint(self):
-        """测试获取原始入口点"""
         tar_path = create_test_image_tar(
-            self.tmpdir_path,
-            entrypoint=["python"],
-            cmd=["app.py", "--flag"],
+            self.tmpdir_path, entrypoint=["python"], cmd=["app.py", "--flag"]
         )
-
         injector = ImageInjector(str(tar_path))
         entrypoint, cmd = injector.get_original_entrypoint()
-
         self.assertEqual(entrypoint, ["python"])
         self.assertEqual(cmd, ["app.py", "--flag"])
 
     def test_get_original_entrypoint_none(self):
-        """测试空入口点"""
-        tar_path = create_test_image_tar(
-            self.tmpdir_path,
-            entrypoint=None,
-            cmd=None,
-        )
-
+        tar_path = create_test_image_tar(self.tmpdir_path, entrypoint=None, cmd=None)
         injector = ImageInjector(str(tar_path))
         entrypoint, cmd = injector.get_original_entrypoint()
-
         self.assertEqual(entrypoint, [])
         self.assertEqual(cmd, [])
 
     def test_is_injected_false(self):
-        """测试未注入标记检测"""
         tar_path = create_test_image_tar(self.tmpdir_path)
-
-        injector = ImageInjector(str(tar_path))
-        self.assertFalse(injector.is_injected())
+        self.assertFalse(ImageInjector(str(tar_path)).is_injected())
 
     def test_inject_creates_new_tar(self):
-        """测试注入创建新tar文件"""
         tar_path = create_test_image_tar(
-            self.tmpdir_path,
-            entrypoint=["python"],
-            cmd=["app.py"],
+            self.tmpdir_path, entrypoint=["python"], cmd=["app.py"]
         )
         output_path = self.tmpdir_path / "output.tar"
-
-        injector = ImageInjector(str(tar_path))
-        result = injector.inject(str(output_path))
-
+        result = ImageInjector(str(tar_path)).inject(str(output_path))
         self.assertEqual(result, str(output_path))
         self.assertTrue(output_path.exists())
 
     def test_inject_modifies_entrypoint(self):
-        """测试注入后入口点被修改"""
         tar_path = create_test_image_tar(
-            self.tmpdir_path,
-            entrypoint=["python"],
-            cmd=["app.py"],
+            self.tmpdir_path, entrypoint=["python"], cmd=["app.py"]
         )
         output_path = self.tmpdir_path / "output.tar"
+        ImageInjector(str(tar_path)).inject(str(output_path))
 
-        injector = ImageInjector(str(tar_path))
-        injector.inject(str(output_path))
-
-        # 检查输出镜像
-        output_injector = ImageInjector(str(output_path))
-        entrypoint, cmd = output_injector.get_original_entrypoint()
-
-        # 注入后的入口点应该是wrapper
+        entrypoint, cmd = ImageInjector(str(output_path)).get_original_entrypoint()
         self.assertEqual(entrypoint, ["python3", "/opt/satcontainer/checkpoint_wrapper.py"])
         self.assertEqual(cmd, [])
 
     def test_inject_sets_env_vars(self):
-        """测试注入后环境变量被设置"""
         tar_path = create_test_image_tar(
-            self.tmpdir_path,
-            entrypoint=["python"],
-            cmd=["app.py"],
+            self.tmpdir_path, entrypoint=["python"], cmd=["app.py"]
         )
         output_path = self.tmpdir_path / "output.tar"
+        ImageInjector(str(tar_path)).inject(str(output_path))
 
-        injector = ImageInjector(str(tar_path))
-        injector.inject(str(output_path))
-
-        # 读取输出镜像的配置
         with tarfile.open(output_path, "r") as tar:
             manifest = json.load(tar.extractfile("manifest.json"))
             config = json.load(tar.extractfile(manifest[0]["Config"]))
 
-        env = config.get("config", {}).get("Env", [])
-        env_dict = dict(e.split("=", 1) for e in env)
-
+        env_dict = dict(e.split("=", 1) for e in config.get("config", {}).get("Env", []))
         self.assertIn("ORIGINAL_ENTRYPOINT", env_dict)
         self.assertIn("ORIGINAL_CMD", env_dict)
         self.assertEqual(json.loads(env_dict["ORIGINAL_ENTRYPOINT"]), ["python"])
         self.assertEqual(json.loads(env_dict["ORIGINAL_CMD"]), ["app.py"])
 
     def test_inject_marks_as_injected(self):
-        """测试注入后标记为已注入"""
         tar_path = create_test_image_tar(self.tmpdir_path)
         output_path = self.tmpdir_path / "output.tar"
-
-        injector = ImageInjector(str(tar_path))
-        injector.inject(str(output_path))
-
-        output_injector = ImageInjector(str(output_path))
-        self.assertTrue(output_injector.is_injected())
+        ImageInjector(str(tar_path)).inject(str(output_path))
+        self.assertTrue(ImageInjector(str(output_path)).is_injected())
 
     def test_inject_adds_wrapper_layer(self):
-        """测试注入添加了wrapper layer"""
         tar_path = create_test_image_tar(self.tmpdir_path)
         output_path = self.tmpdir_path / "output.tar"
+        ImageInjector(str(tar_path)).inject(str(output_path))
 
-        injector = ImageInjector(str(tar_path))
-        injector.inject(str(output_path))
-
-        # 检查layer数量增加了
         with tarfile.open(output_path, "r") as tar:
             manifest = json.load(tar.extractfile("manifest.json"))
-            # 原来1个layer，现在应该是2个
             self.assertEqual(len(manifest[0]["Layers"]), 2)
 
     def test_inject_refuses_overwrite(self):
-        """测试不允许覆盖已存在文件"""
         tar_path = create_test_image_tar(self.tmpdir_path)
         output_path = self.tmpdir_path / "output.tar"
         output_path.write_bytes(b"existing")
-
-        injector = ImageInjector(str(tar_path))
-
         with self.assertRaises(FileExistsError):
-            injector.inject(str(output_path))
+            ImageInjector(str(tar_path)).inject(str(output_path))
 
     def test_inject_force_overwrite(self):
-        """测试强制覆盖"""
         tar_path = create_test_image_tar(self.tmpdir_path)
         output_path = self.tmpdir_path / "output.tar"
         output_path.write_bytes(b"existing")
-
-        injector = ImageInjector(str(tar_path))
-        result = injector.inject(str(output_path), force=True)
-
+        result = ImageInjector(str(tar_path)).inject(str(output_path), force=True)
         self.assertEqual(result, str(output_path))
 
     def test_file_not_found(self):
-        """测试输入文件不存在"""
         with self.assertRaises(FileNotFoundError):
             ImageInjector("/nonexistent/path.tar")
 
 
 class TestDockerfileParsing(unittest.TestCase):
-    """Dockerfile解析测试"""
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
@@ -254,26 +181,22 @@ class TestDockerfileParsing(unittest.TestCase):
         shutil.rmtree(self.tmpdir)
 
     def test_parse_dockerfile_json_format(self):
-        """测试解析JSON格式的Dockerfile指令"""
         tar_path = create_test_image_tar(self.tmpdir_path)
         dockerfile = self.tmpdir_path / "Dockerfile"
         dockerfile.write_text('ENTRYPOINT ["python", "app.py"]\nCMD ["--help"]')
 
         injector = ImageInjector(str(tar_path), dockerfile=str(dockerfile))
         entrypoint, cmd = injector._parse_dockerfile_entrypoint()
-
         self.assertEqual(entrypoint, ["python", "app.py"])
         self.assertEqual(cmd, ["--help"])
 
     def test_parse_dockerfile_shell_format(self):
-        """测试解析Shell格式的Dockerfile指令"""
         tar_path = create_test_image_tar(self.tmpdir_path)
         dockerfile = self.tmpdir_path / "Dockerfile"
         dockerfile.write_text("ENTRYPOINT python app.py")
 
         injector = ImageInjector(str(tar_path), dockerfile=str(dockerfile))
         entrypoint, cmd = injector._parse_dockerfile_entrypoint()
-
         self.assertEqual(entrypoint, ["sh", "-c", "python app.py"])
 
 

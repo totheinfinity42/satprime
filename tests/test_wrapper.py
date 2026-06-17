@@ -1,6 +1,5 @@
-"""checkpoint_wrapper 单元测试"""
+"""Tests for the checkpoint wrapper."""
 
-import ast
 import json
 import os
 import sys
@@ -8,77 +7,61 @@ import tempfile
 import unittest
 from pathlib import Path
 
-# 添加项目路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from satcontainer.injector.wrapper.checkpoint_wrapper import CheckpointWrapper
+from satecode.agent import CheckpointWrapper
 
 
 class TestCheckpointWrapper(unittest.TestCase):
-    """CheckpointWrapper 测试"""
 
     def setUp(self):
-        """设置测试环境"""
         self.original_env = os.environ.copy()
         os.environ["ORIGINAL_ENTRYPOINT"] = '["python"]'
         os.environ["ORIGINAL_CMD"] = '["app.py"]'
 
     def tearDown(self):
-        """恢复环境"""
         os.environ.clear()
         os.environ.update(self.original_env)
 
     def test_init_parses_env(self):
-        """测试环境变量解析"""
         wrapper = CheckpointWrapper()
         self.assertEqual(wrapper.original_entrypoint, ["python"])
         self.assertEqual(wrapper.original_cmd, ["app.py"])
         self.assertFalse(wrapper.checkpoint_enabled)
 
     def test_checkpoint_enabled(self):
-        """测试检查点模式启用"""
         os.environ["CHECKPOINT_ENABLED"] = "1"
         wrapper = CheckpointWrapper()
         self.assertTrue(wrapper.checkpoint_enabled)
 
     def test_find_python_script_simple(self):
-        """测试简单的脚本查找"""
         wrapper = CheckpointWrapper()
 
-        # python script.py
         path, args, module = wrapper.find_python_script(["python", "app.py"])
         self.assertEqual(path, "app.py")
         self.assertEqual(args, [])
         self.assertIsNone(module)
 
-        # python3 script.py
         path, args, module = wrapper.find_python_script(["python3", "main.py"])
         self.assertEqual(path, "main.py")
         self.assertEqual(args, [])
         self.assertIsNone(module)
 
     def test_find_python_script_with_flags(self):
-        """测试带参数的脚本查找"""
         wrapper = CheckpointWrapper()
 
-        # python -u script.py
         path, args, module = wrapper.find_python_script(["python", "-u", "app.py"])
         self.assertEqual(path, "app.py")
         self.assertEqual(args, [])
         self.assertIsNone(module)
 
-        # python -B -O script.py
         path, args, module = wrapper.find_python_script(["python", "-B", "-O", "main.py"])
         self.assertEqual(path, "main.py")
         self.assertEqual(args, [])
         self.assertIsNone(module)
 
     def test_find_python_script_module_mode(self):
-        """测试模块模式支持"""
         wrapper = CheckpointWrapper()
-
-        # python -m json.tool
-        # json 模块肯定存在于标准库中
         path, args, module = wrapper.find_python_script(["python", "-m", "json.tool", "test.json"])
         self.assertIsNotNone(path)
         self.assertTrue(path.endswith(".py"))
@@ -86,28 +69,23 @@ class TestCheckpointWrapper(unittest.TestCase):
         self.assertEqual(args, ["test.json"])
 
     def test_find_python_script_invalid_module(self):
-        """测试无效模块"""
         wrapper = CheckpointWrapper()
-
-        # python -m non_existent_module_xyz
         path, args, module = wrapper.find_python_script(["python", "-m", "non_existent_module_xyz"])
         self.assertIsNone(path)
         self.assertIsNone(module)
 
     def test_analyze_imports(self):
-        """测试import分析"""
         wrapper = CheckpointWrapper()
 
-        # 创建临时Python文件
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
-            f.write("""
-import torch
-import numpy as np
-from PIL import Image
-from collections import defaultdict
-import os.path
-from torchvision.models import resnet50
-""")
+            f.write(
+                "import torch\n"
+                "import numpy as np\n"
+                "from PIL import Image\n"
+                "from collections import defaultdict\n"
+                "import os.path\n"
+                "from torchvision.models import resnet50\n"
+            )
             temp_path = f.name
 
         try:
@@ -122,26 +100,19 @@ from torchvision.models import resnet50
             os.unlink(temp_path)
 
     def test_analyze_imports_relative(self):
-        """测试相对导入不会报错"""
         wrapper = CheckpointWrapper()
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
-            f.write("""
-from . import utils
-from ..common import helper
-import torch
-""")
+            f.write("from . import utils\nfrom ..common import helper\nimport torch\n")
             temp_path = f.name
 
         try:
             modules = wrapper.analyze_imports(temp_path)
             self.assertIn("torch", modules)
-            # 相对导入不应该包含在结果中
         finally:
             os.unlink(temp_path)
 
     def test_analyze_imports_syntax_error(self):
-        """测试语法错误处理"""
         wrapper = CheckpointWrapper()
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
@@ -150,28 +121,25 @@ import torch
 
         try:
             modules = wrapper.analyze_imports(temp_path)
-            self.assertEqual(modules, [])  # 应该返回空列表
+            self.assertEqual(modules, [])
         finally:
             os.unlink(temp_path)
 
 
 class TestImportAnalysis(unittest.TestCase):
-    """Import分析边界情况测试"""
 
     def test_nested_imports(self):
-        """测试嵌套模块导入"""
         wrapper = CheckpointWrapper()
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
-            f.write("""
-import torch.nn.functional as F
-from torchvision.transforms.v2 import Compose
-""")
+            f.write(
+                "import torch.nn.functional as F\n"
+                "from torchvision.transforms.v2 import Compose\n"
+            )
             temp_path = f.name
 
         try:
             modules = wrapper.analyze_imports(temp_path)
-            # 应该返回完整的模块路径
             self.assertIn("torch.nn.functional", modules)
             self.assertIn("torchvision.transforms.v2", modules)
         finally:

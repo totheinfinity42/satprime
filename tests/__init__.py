@@ -1,1 +1,1 @@
-"""SatContainer 测试套件"""
+"""satecode test suite."""
