@@ -1,6 +1,7 @@
 import subprocess
 import tempfile
 from pathlib import Path
+from string import Template
 
 
 _C_SRC = r"""
@@ -65,6 +66,43 @@ ExecStart={exec_path} {image_path} {boundary}
 WantedBy=sysinit.target
 """
 
+_LAUNCH_TMPL = Template(r"""#!/bin/sh
+set -u
+
+RUNC="$${RUNC:-$runc}"
+BUNDLE="$${BUNDLE:-$bundle}"
+SNAP="$${SNAP:-$snap}"
+CID="$${CID:-$cid}"
+WORK="$${WORK:-$work}"
+
+_log() { echo "[launcher] $$*" >&2; }
+
+_warm() {
+    [ -d "$$SNAP" ] || { _log "snapshot dir missing: $$SNAP"; return 1; }
+    _log "attempting restore: $$CID"
+    "$$RUNC" restore \
+        --image-path "$$SNAP" \
+        --work-path "$$WORK" \
+        --bundle "$$BUNDLE" \
+        "$$CID"
+}
+
+_cold() {
+    _log "starting cold: $$CID"
+    "$$RUNC" delete --force "$$CID" >/dev/null 2>&1 || true
+    "$$RUNC" run --bundle "$$BUNDLE" "$$CID"
+}
+
+if _warm; then
+    exit 0
+fi
+
+_rc=$$?
+_log "restore failed (rc=$$_rc), falling back"
+_cold
+exit $$?
+""")
+
 _CC_MAP = {
     "aarch64": "aarch64-linux-gnu-gcc",
     "arm":     "arm-linux-gnueabihf-gcc",
@@ -86,6 +124,16 @@ def unit(image_path: str, boundary: int,
     )
 
 
+def launcher(runc: str = "/usr/bin/runc",
+             bundle: str = "/var/run/containers/bundle",
+             snap: str = "/var/run/containers/snap",
+             cid: str = "app",
+             work: str = "/tmp/runc-work") -> str:
+    return _LAUNCH_TMPL.substitute(
+        runc=runc, bundle=bundle, snap=snap, cid=cid, work=work,
+    )
+
+
 def compile_primer(src: str, out: Path, arch: str = "native",
                    cflags: str = "-O2 -static") -> None:
     cc = _CC_MAP.get(arch)
@@ -103,7 +151,12 @@ def compile_primer(src: str, out: Path, arch: str = "native",
 
 def emit(output_dir: Path, image_path: str, boundary: int,
          arch: str = "native", compile_binary: bool = True,
-         exec_path: str = "/usr/local/bin/sat_primer") -> dict:
+         exec_path: str = "/usr/local/bin/sat_primer",
+         runc: str = "/usr/bin/runc",
+         bundle: str = "/var/run/containers/bundle",
+         snap: str = "/var/run/containers/snap",
+         cid: str = "app",
+         work: str = "/tmp/runc-work") -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
     out = {}
 
@@ -114,6 +167,12 @@ def emit(output_dir: Path, image_path: str, boundary: int,
     unit_path = output_dir / "sat-primer.service"
     unit_path.write_text(unit(image_path, boundary, exec_path))
     out["unit"] = unit_path
+
+    launch_path = output_dir / "launch.sh"
+    launch_path.write_text(launcher(runc=runc, bundle=bundle,
+                                    snap=snap, cid=cid, work=work))
+    launch_path.chmod(0o755)
+    out["launcher"] = launch_path
 
     if compile_binary:
         bin_path = output_dir / "sat_primer"

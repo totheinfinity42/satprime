@@ -14,7 +14,7 @@ from typing import Dict, List, Optional, Tuple
 
 
 _INOTIFY_HDR = struct.Struct("iIII")
-_IN_MASK = 0x00000108   # IN_CREATE | IN_CLOSE_WRITE
+_IN_MASK = 0x00000108
 
 
 def _inotify_wait(directory: str, filename: str, timeout: float) -> bool:
@@ -170,10 +170,6 @@ class SnapshotCoordinator:
             _deliver_signal(self.task_id, self.token_path, self.runtime, self.namespace)
         return result
 
-
-# ---------------------------------------------------------------------------
-# Access sequence recorder (formerly "trace")
-# ---------------------------------------------------------------------------
 
 _OPENAT_RE = re.compile(r'^\d+\s+openat\(AT_FDCWD,\s*"([^"]+)",[^)]+\)\s*=\s*(\d+)')
 _OPEN_RE   = re.compile(r'^\d+\s+open\("([^"]+)",[^)]+\)\s*=\s*(\d+)')

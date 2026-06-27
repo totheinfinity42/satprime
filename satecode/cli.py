@@ -152,6 +152,11 @@ def cmd_emit(args: argparse.Namespace) -> int:
             arch=args.arch,
             compile_binary=not args.no_compile,
             exec_path=args.exec_path,
+            runc=args.runc,
+            bundle=args.bundle,
+            snap=args.snap,
+            cid=args.cid,
+            work=args.work,
         )
         for k, v in artifacts.items():
             print("{}: {}".format(k, v))
@@ -161,7 +166,6 @@ def cmd_emit(args: argparse.Namespace) -> int:
         if args.verbose:
             import traceback; traceback.print_exc()
         return 1
-
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -214,13 +218,16 @@ def create_parser() -> argparse.ArgumentParser:
     s.add_argument("-o", "--output-dir", required=True, dest="output_dir")
     s.add_argument("--image-path",       default=None,  dest="image_path")
     s.add_argument("--boundary",         type=int, default=None)
-    s.add_argument("--meta",             default=None,
-                   help="path to .meta.json written by build (alternative to "
-                        "--image-path + --boundary)")
+    s.add_argument("--meta",             default=None)
     s.add_argument("--arch", default="native",
                    choices=["native", "aarch64", "arm", "x86_64"])
     s.add_argument("--no-compile",  action="store_true", dest="no_compile")
     s.add_argument("--exec-path",   default="/usr/local/bin/sat_primer", dest="exec_path")
+    s.add_argument("--runc",        default="/usr/bin/runc")
+    s.add_argument("--bundle",      default="/var/run/containers/bundle")
+    s.add_argument("--snap",        default="/var/run/containers/snap")
+    s.add_argument("--cid",         default="app")
+    s.add_argument("--work",        default="/tmp/runc-work")
     s.set_defaults(func=cmd_emit)
 
     return p

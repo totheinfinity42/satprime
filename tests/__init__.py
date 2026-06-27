@@ -1,1 +1,0 @@
-"""satecode test suite."""

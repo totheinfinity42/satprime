@@ -18,10 +18,6 @@ _FRAME_FMT   = struct.Struct(">4sHH QQ 8x")
 assert _FRAME_FMT.size == 32
 
 
-# ---------------------------------------------------------------------------
-# OCI/Docker tar internals
-# ---------------------------------------------------------------------------
-
 def _is_oci(tar: tarfile.TarFile) -> bool:
     try:
         tar.getmember("oci-layout")
@@ -97,10 +93,6 @@ def _parse_df_instruction(line: str, kw: str) -> list:
     return ["sh", "-c", val]
 
 
-# ---------------------------------------------------------------------------
-# Image patcher (formerly "injector")
-# ---------------------------------------------------------------------------
-
 class ImagePatcher:
 
     def __init__(self, input_tar: str, dockerfile: Optional[str] = None,
@@ -142,7 +134,6 @@ class ImagePatcher:
         labels = self._img_cfg.get("config", {}).get("Labels") or {}
         return labels.get(self.config.patched_label) == "true"
 
-    # kept for test compat
     def is_injected(self) -> bool:
         return self.is_patched()
 
@@ -311,17 +302,12 @@ class ImagePatcher:
 
         return str(out)
 
-    # legacy alias
     def inject(self, output_tar: str, force: bool = False, tag_suffix: str = "-wrapped") -> str:
         return self.patch(output_tar, force=force, tag_suffix=tag_suffix)
 
     def _parse_dockerfile_entrypoint(self):
         return self._df_entrypoint()
 
-
-# ---------------------------------------------------------------------------
-# Layer extraction (used by image builder)
-# ---------------------------------------------------------------------------
 
 def _apply_layer_tar(layer_tar: tarfile.TarFile, dest: Path) -> None:
     for m in layer_tar.getmembers():
@@ -391,10 +377,6 @@ def extract_image(image_tar: Path, dest: Path) -> None:
             with tarfile.open(fileobj=io.BytesIO(raw)) as lt:
                 _apply_layer_tar(lt, dest)
 
-
-# ---------------------------------------------------------------------------
-# Image frame builder (formerly "pack")
-# ---------------------------------------------------------------------------
 
 def _build_ordered_tar(rootfs: Path, aux_dir: Optional[Path],
                        tier_a: List[str], tier_b: List[str],

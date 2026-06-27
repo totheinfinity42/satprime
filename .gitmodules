@@ -1,0 +1,39 @@
+[submodule "apps/app1/Object_Detection"]
+	path = apps/app1/Object_Detection
+	url = https://github.com/Haleshot/Object_Detection
+
+[submodule "apps/app2/edge-processing-remote-sensing"]
+	path = apps/app2/edge-processing-remote-sensing
+	url = https://github.com/boemer00/edge-processing-remote-sensing
+
+[submodule "apps/app3/PyRawS"]
+	path = apps/app3/PyRawS
+	url = https://github.com/ESA-PhiLab/PyRawS
+
+[submodule "apps/app4/torchgeo"]
+	path = apps/app4/torchgeo
+	url = https://github.com/torchgeo/torchgeo
+
+[submodule "apps/app5/yolov5_obb"]
+	path = apps/app5/yolov5_obb
+	url = https://github.com/hukaixuan19970627/yolov5_obb
+
+[submodule "apps/app6/mmrotate"]
+	path = apps/app6/mmrotate
+	url = https://github.com/open-mmlab/mmrotate
+
+[submodule "apps/app7/node-image-classification"]
+	path = apps/app7/node-image-classification
+	url = https://github.com/tejas77/node-image-classification
+
+[submodule "apps/app8/js-orbital-inference"]
+	path = apps/app8/js-orbital-inference
+	url = https://github.com/side-source/js-orbital-inference
+
+[submodule "apps/app9/object-detection-app"]
+	path = apps/app9/object-detection-app
+	url = https://github.com/rh-aiservices-bu/object-detection-app
+
+[submodule "apps/app10/node-tfjs-retrain"]
+	path = apps/app10/node-tfjs-retrain
+	url = https://github.com/adwellj/node-tfjs-retrain
