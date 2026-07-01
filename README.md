@@ -20,18 +20,17 @@
 
 ## Satellite Application Performance Optimization Code
 
-The optimization framework operates through a coordinated multi-phase pipeline, implemented across modules under `satecode/`.
+SatePrime implements a performance optimization framework for containerized satellite applications through two phases, located in the `satecode/` directory. It follows a profile–synthesize–recover design that moves complex, non-real-time analysis to the ground and enables fast recovery onboard.
 
- - A static initialization preloader is injected into the execution artifact, constructing a transitive dependency closure and materializing it within the host process prior to application entry, thereby collapsing cold-path latency.
-    - Core logic resides in `agent.py` and `runtime.py`.
- - A state-preserving suspension mechanism captures the live process image at a well-defined synchronization barrier, persisting the memory-resident representation for subsequent warm-path restoration.
-    - Core logic resides in `monitor.py`.
- - An access-trace profiler instruments the artifact's initialization sequence, partitioning the file corpus into a latency-critical foreground tier and a deferrable background tier based on temporal proximity to launch completion.
-    - Core logic resides in `monitor.py`.
- - A stratified artifact compiler consumes the tiered partitioning and emits a self-describing linearized image with an embedded heat boundary, allowing an external pre-warmer to stage critical blocks into the page cache before the runtime engine is invoked.
-    - Core logic resides in `runtime.py` and `codegen.py`.
-- Auxiliary tooling
-    - A CLI entry point exposing the above stages as composable subcommands. (`cli.py`)
+The Ground-Side Construction Phase, deployed on the ground, generates an optimized and recoverable container image for a given application. It first performs application-state profiling: an injected entrypoint wrapper statically analyzes the application's imports, preloads all dependencies, and suspends itself at a stable recovery point after dependency loading and before input-specific computation, at which point the reusable process state is captured through process checkpointing (Step 1). It then performs boot-and-recovery access profiling by replaying the recovery process with I/O tracing to derive the file access order along the startup path, partitioning files into a startup-critical foreground tier and a deferrable background tier (Step 2). Finally, it performs recoverable image synthesis: the original root file system is merged with the captured state and relaid out in access order, then packed into a read-only EROFS image with an embedded heat boundary (Step 3).
+The main implementation is provided in the files `agent.py`, `runtime.py`, and `monitor.py`.
+
+The Satellite-Side Execution Phase, residing in the satellite system, restores and runs the application from the optimized image instead of starting from scratch. Once the computing payload is powered on, it prefetches the heat-boundary bytes of the image to warm the page cache during system startup, then restores the application from the recovery point and resumes execution directly (Step 4). In addition, it integrates a reliability fallback mechanism that checks recovery before, during, and after restoration and automatically reverts to the original cold-start path in case of recovery failures (Step 5).
+The main implementation is provided in the file `codegen.py`.
+
+Other code
+ - We provide a command-line entry point that exposes the above stages as composable subcommands (`patch`, `snapshot`, `record`, `build`, `emit`). (`cli.py` and `__main__.py`)
+ - We provide shared configuration for image labels, environment keys, and file paths used across the pipeline. (`config.py`)
 
 
 ## Deployment
